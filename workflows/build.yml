@@ -1,0 +1,56 @@
+name: Build
+
+on: push
+
+env:
+  project: project
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@master
+        with:
+          submodules: true
+
+      - name: Setup
+        run: |
+          rustup toolchain install stable --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@master
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - name: Collect
+        run: |
+          mkdir artifacts
+
+      - name: Collect Windows
+        if: matrix.target == 'windows'
+        run: |
+          cp target/release/${{ env.project }}.exe artifacts
+
+      - name: Collect Unix
+        if: matrix.target != 'windows'
+        run: |
+          cp target/release/${{ env.project }} artifacts
+
+      - name: Upload
+        uses: actions/upload-artifact@master
+        with:
+          name: ${{ env.project }}-${{ matrix.target }}
+          path: artifacts

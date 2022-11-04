@@ -1,0 +1,68 @@
+name: Build
+
+on: push
+
+env:
+  project: project
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@master
+        with:
+          submodules: true
+
+      - name: Setup
+        run: |
+          rustup toolchain install stable --profile minimal
+
+      - name: Setup Linux
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install libsdl2-dev
+
+      - name: Setup macOS
+        if: matrix.target == 'macos'
+        run: |
+          brew install sdl2
+
+      - name: Cache
+        uses: Swatinem/rust-cache@master
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - name: Collect
+        run: |
+          mkdir artifacts
+
+      - name: Collect Windows
+        if: matrix.target == 'windows'
+        run: |
+          cp target/release/${{ env.project }}.exe artifacts
+          cp SDL2.dll artifacts
+
+      - name: Collect Unix
+        if: matrix.target != 'windows'
+        run: |
+          cp target/release/${{ env.project }} artifacts
+
+      - name: Upload
+        uses: actions/upload-artifact@master
+        with:
+          name: ${{ env.project }}-${{ matrix.target }}
+          path: artifacts
