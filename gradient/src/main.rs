@@ -3,8 +3,9 @@ extern crate sdl2;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
+use std::error::Error;
 
-pub fn main() -> Result<(), String> {
+fn run() -> Result<(), Box<dyn Error>> {
     let sdl = sdl2::init()?;
     let sdl_video = sdl.video()?;
 
@@ -12,19 +13,14 @@ pub fn main() -> Result<(), String> {
         .window("gradient", 256, 256)
         .position_centered()
         .opengl()
-        .build()
-        .map_err(|error| error.to_string())?;
+        .build()?;
 
-    let mut canvas = window
-        .into_canvas()
-        .build()
-        .map_err(|error| error.to_string())?;
+    let mut canvas = window.into_canvas().build()?;
 
     let texture_creator = canvas.texture_creator();
 
-    let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::ARGB8888, 256, 256)
-        .map_err(|error| error.to_string())?;
+    let mut texture =
+        texture_creator.create_texture_streaming(PixelFormatEnum::ARGB8888, 256, 256)?;
 
     texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
         for y in 0..256 {
@@ -57,4 +53,11 @@ pub fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprint!("Application error: {error}");
+        std::process::exit(1);
+    }
 }
