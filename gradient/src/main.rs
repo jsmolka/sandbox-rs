@@ -1,11 +1,9 @@
-extern crate sdl2;
-
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 use std::error::Error;
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let sdl = sdl2::init()?;
     let sdl_video = sdl.video()?;
 
@@ -53,11 +51,4 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn main() {
-    if let Err(error) = run() {
-        eprint!("Application error: {error}");
-        std::process::exit(1);
-    }
 }
