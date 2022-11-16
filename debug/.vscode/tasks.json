@@ -8,8 +8,7 @@
       "label": "build",
       "type": "shell",
       "args": [
-        "build",
-        "-v"
+        "build"
       ]
     }
   ]
