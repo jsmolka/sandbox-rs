@@ -1,1 +1,3 @@
-pub fn func() {}
+pub fn func() {
+    super::func();
+}
