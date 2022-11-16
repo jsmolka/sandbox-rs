@@ -1,0 +1,10 @@
+[package]
+name = "workspace"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["arithmetic"]
+
+[dependencies]
+arithmetic = { path = "arithmetic" }
