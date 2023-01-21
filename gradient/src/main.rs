@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sdl_video = sdl.video()?;
 
     let window = sdl_video
-        .window("gradient", 256, 256)
+        .window("spirit", 256, 240)
         .position_centered()
         .opengl()
         .build()?;
