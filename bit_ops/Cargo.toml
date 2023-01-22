@@ -3,4 +3,11 @@ name = "bit_ops"
 version = "0.1.0"
 edition = "2021"
 
+[[bench]]
+name = "benchmark"
+harness = false
+
+[dev-dependencies]
+criterion = "0.4"
+
 [dependencies]
