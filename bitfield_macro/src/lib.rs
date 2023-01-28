@@ -1,5 +1,6 @@
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::TokenStream;
 use quote::*;
+use std::ops::Range;
 use syn::parse::*;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -20,18 +21,15 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     let mut data_mask: u64 = 0;
     let mut fields = vec![];
     for field in bitfield.fields {
-        if field.range.lo >= field.range.hi || field.range.hi > bitfield_type_bits {
-            return Err(Error::new(field.range.span, "Bitfield invalid range"));
-        }
-
         let visibility = &field.visibility;
         let field_type = &field.underlying_type;
         let ident = &field.ident;
-        let set_ident = format_ident!("set_{ident}");
+        let ident_set = format_ident!("set_{ident}");
         let return_type = &field.return_type();
+        let range = field.to_open_range(bitfield_type_bits)?;
 
-        let mask = field.range.mask();
-        let shift = field.range.shift();
+        let mask = u64::MAX >> (u64::BITS as usize - (range.end - range.start));
+        let shift = range.start;
 
         data_mask |= mask << shift;
 
@@ -52,7 +50,7 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
                 value
             }
 
-            #visibility fn #set_ident(&mut self, value: #field_type) {
+            #visibility fn #ident_set(&mut self, value: #field_type) {
                 let mask = #mask as #bitfield_type;
                 let shift = #shift as #bitfield_type;
                 self.data = (self.data & !(mask << shift)) | ((value & mask) << shift);
@@ -79,40 +77,11 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     })
 }
 
-struct Range {
-    pub span: Span,
-    pub lo: usize,
-    pub hi: usize,
-}
-
-impl Parse for Range {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let lo = input.parse::<LitInt>()?.base10_parse()?;
-        let _: Token![..] = input.parse()?;
-        let hi = input.parse::<LitInt>()?.base10_parse()?;
-        Ok(Range {
-            span: input.span(),
-            lo,
-            hi,
-        })
-    }
-}
-
-impl Range {
-    pub fn mask(&self) -> u64 {
-        u64::MAX >> (u64::BITS as usize - (self.hi - self.lo))
-    }
-
-    pub fn shift(&self) -> u64 {
-        self.lo as u64
-    }
-}
-
 struct Field {
     pub visibility: Visibility,
     pub ident: Ident,
     pub underlying_type: Type,
-    pub range: Range,
+    pub range: ExprRange,
     pub modifier: Option<ExprClosure>,
 }
 
@@ -126,6 +95,36 @@ impl Field {
         } else {
             &self.underlying_type
         }
+    }
+}
+
+impl Field {
+    pub fn to_open_range(&self, max_open_end: usize) -> Result<Range<usize>> {
+        let parse = |expr: Box<Expr>| {
+            if let Expr::Lit(ref expr) = *expr {
+                if let Lit::Int(ref literal) = expr.lit {
+                    return literal.base10_parse();
+                }
+            }
+            Err(Error::new(expr.span(), "Bitfield expected integer literal"))
+        };
+
+        let start = self.range.from.clone().map_or_else(|| Ok(0), parse)?;
+        let mut end = self
+            .range
+            .to
+            .clone()
+            .map_or_else(|| Ok(max_open_end), parse)?;
+
+        if let RangeLimits::Closed(_) = self.range.limits {
+            end += 1
+        }
+
+        if start >= end || end > max_open_end {
+            return Err(Error::new(self.range.span(), "Bitfield invalid range"));
+        }
+
+        Ok(Range { start, end })
     }
 }
 
