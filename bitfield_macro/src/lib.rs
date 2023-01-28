@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::*;
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 use syn::parse::*;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -14,32 +14,30 @@ pub fn bitfield(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
-    let bitfield = syn::parse::<Bitfield>(input)?;
-    let data_type = &bitfield.type_;
+    let bitfield = parse::<Bitfield>(input)?;
+    let data_type = &bitfield.ty;
     let data_type_size = type_size(data_type);
 
-    let mut data_mask: u64 = 0;
-    let mut fields = vec![];
+    let mut data_mask = 0u64;
+    let mut functions = vec![];
     for field in bitfield.fields {
         let visibility = &field.visibility;
-        let value_type = &field.type_;
+        let field_type = &field.ty;
+        let ident = &field.ident;
+        let ident_set = format_ident!("set_{ident}");
+        let return_type = field.return_type();
 
-        let set_value_type = match value_type.to_token_stream().to_string().as_str() {
+        let value_cast = match field_type.to_token_stream().to_string().as_str() {
             "bool" => quote! {
                 let value = value != 0;
             },
             "u8" | "u16" | "u32" | "u64" | "usize" => quote! {
-                let value = value as #value_type;
+                let value = value as #field_type;
             },
-            _ => {
-                return Err(Error::new(
-                    value_type.span(),
-                    "Bitfield field type must be a bool or unsigned int",
-                ))
-            }
+            _ => unreachable!(),
         };
 
-        let set_value_modifier = if let Some(ref modifier) = field.modifier {
+        let value_modify = if let Some(modifier) = &field.modifier {
             quote! {
                 let value = (#modifier)(value);
             }
@@ -48,30 +46,25 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
         };
 
         let range = field.parse_range()?;
-        if !(range.start < range.end && range.end <= type_bits(value_type)) {
+        if !(range.start < range.end && range.end <= type_bits(field_type)) {
             return Err(Error::new(field.range.span(), "Bitfield range is invalid"));
         }
 
         let mask = u64::MAX >> (u64::BITS as usize - range.len());
         let shift = range.start;
-
         data_mask |= mask << shift;
 
-        let ident = &field.ident;
-        let ident_set = format_ident!("set_{ident}");
-        let return_type = field.return_type();
-
-        fields.push(quote! {
+        functions.push(quote! {
             #visibility fn #ident(&self) -> #return_type {
                 let mask = #mask as #data_type;
                 let shift = #shift as #data_type;
                 let value = (self.data >> shift) & mask;
-                #set_value_type
-                #set_value_modifier
+                #value_cast
+                #value_modify
                 value
             }
 
-            #visibility fn #ident_set(&mut self, value: #value_type) {
+            #visibility fn #ident_set(&mut self, value: #field_type) {
                 let value = value as #data_type;
                 let mask = #mask as #data_type;
                 let shift = #shift as #data_type;
@@ -120,7 +113,7 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
                 self.data = (self.data & !(0xFF << (8 * index))) | data;
             }
 
-            #(#fields)*
+            #(#functions)*
         }
 
         impl From<#data_type> for #ident {
@@ -137,9 +130,9 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     })
 }
 
-fn type_size(type_: &Type) -> usize {
+fn type_size(ty: &Type) -> usize {
     use std::mem::size_of;
-    match type_.to_token_stream().to_string().as_str() {
+    match ty.to_token_stream().to_string().as_str() {
         "bool" => size_of::<bool>(),
         "u8" => size_of::<u8>(),
         "u16" => size_of::<u16>(),
@@ -150,10 +143,10 @@ fn type_size(type_: &Type) -> usize {
     }
 }
 
-fn type_bits(type_: &Type) -> usize {
-    match type_.to_token_stream().to_string().as_str() {
+fn type_bits(ty: &Type) -> usize {
+    match ty.to_token_stream().to_string().as_str() {
         "bool" => 1,
-        "u8" | "u16" | "u32" | "u64" | "usize" => 8 * type_size(type_),
+        "u8" | "u16" | "u32" | "u64" | "usize" => 8 * type_size(ty),
         _ => unreachable!(),
     }
 }
@@ -162,7 +155,7 @@ struct Bitfield {
     pub attributes: Vec<Attribute>,
     pub visibility: Visibility,
     pub ident: Ident,
-    pub type_: Type,
+    pub ty: Type,
     pub fields: Punctuated<Field, Token![,]>,
 }
 
@@ -173,16 +166,12 @@ impl Parse for Bitfield {
         let _: Token![struct] = input.parse()?;
         let ident = input.parse()?;
         let _: Token![:] = input.parse()?;
-        let type_: Type = input.parse()?;
-        match type_.to_token_stream().to_string().as_str() {
+        let ty: Type = input.parse()?;
+
+        match ty.to_token_stream().to_string().as_str() {
             "u8" | "u16" | "u32" | "u64" | "usize" => (),
-            _ => {
-                return Err(Error::new(
-                    type_.span(),
-                    "Bitfield type must be an unsigned int",
-                ));
-            }
-        }
+            _ => return Err(Error::new(ty.span(), "Bitfield type must be an unsigned")),
+        };
 
         let content;
         braced!(content in input);
@@ -192,7 +181,7 @@ impl Parse for Bitfield {
             attributes,
             visibility,
             ident,
-            type_,
+            ty,
             fields,
         })
     }
@@ -201,7 +190,7 @@ impl Parse for Bitfield {
 struct Field {
     pub visibility: Visibility,
     pub ident: Ident,
-    pub type_: Type,
+    pub ty: Type,
     pub range: ExprRange,
     pub modifier: Option<ExprClosure>,
 }
@@ -211,7 +200,7 @@ impl Parse for Field {
         let visibility = input.parse()?;
         let ident = input.parse()?;
         let _: Token![:] = input.parse()?;
-        let type_ = input.parse()?;
+        let ty: Type = input.parse()?;
         let _: Token![@] = input.parse()?;
         let range = input.parse()?;
         let modifier = if input.parse::<Token![=>]>().is_ok() {
@@ -220,10 +209,20 @@ impl Parse for Field {
             None
         };
 
+        match ty.to_token_stream().to_string().as_str() {
+            "bool" | "u8" | "u16" | "u32" | "u64" | "usize" => (),
+            _ => {
+                return Err(Error::new(
+                    ty.span(),
+                    "Bitfield field type must be an unsigned int or bool",
+                ))
+            }
+        };
+
         Ok(Field {
             visibility,
             ident,
-            type_,
+            ty,
             range,
             modifier,
         })
@@ -233,11 +232,11 @@ impl Parse for Field {
 impl Field {
     pub fn return_type(&self) -> &Type {
         if let Some(modifier) = &self.modifier {
-            if let ReturnType::Type(_, type_) = &modifier.output {
-                return type_;
+            if let ReturnType::Type(_, ty) = &modifier.output {
+                return ty;
             }
         }
-        &self.type_
+        &self.ty
     }
 
     pub fn parse_range(&self) -> Result<Range<usize>> {
