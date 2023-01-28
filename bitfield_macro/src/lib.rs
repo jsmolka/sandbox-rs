@@ -1,4 +1,4 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::*;
 use syn::parse::*;
 use syn::punctuated::Punctuated;
@@ -14,25 +14,75 @@ pub fn bitfield(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     let bitfield = syn::parse::<Bitfield>(input)?;
+    let bitfield_type = &bitfield.underlying_type;
+    let bitfield_type_bits = bitfield.underlying_type_bits();
+
+    let mut data_mask: u64 = 0;
+    let mut fields = vec![];
+    for field in bitfield.fields {
+        if field.range.lo >= field.range.hi || field.range.hi > bitfield_type_bits {
+            return Err(Error::new(field.range.span, "Bitfield invalid range"));
+        }
+
+        let visibility = &field.visibility;
+        let field_type = &field.underlying_type;
+        let ident = &field.ident;
+        let set_ident = format_ident!("set_{ident}");
+        let return_type = &field.return_type();
+
+        let mask = field.range.mask();
+        let shift = field.range.shift();
+
+        data_mask |= mask << shift;
+
+        let modifier = if let Some(ref modifier) = field.modifier {
+            quote! {
+                let value = (#modifier)(value);
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        fields.push(quote! {
+            #visibility fn #ident(&self) -> #return_type {
+                let mask = #mask as #bitfield_type;
+                let shift = #shift as #bitfield_type;
+                let value = ((self.data >> shift) & mask) as #field_type;
+                #modifier
+                value
+            }
+
+            #visibility fn #set_ident(&mut self, value: #field_type) {
+                let mask = #mask as #bitfield_type;
+                let shift = #shift as #bitfield_type;
+                self.data = (self.data & !(mask << shift)) | ((value & mask) << shift);
+            }
+        });
+    }
+
+    let visibility = &bitfield.visibility;
     let ident = &bitfield.ident;
-    let underlying_type = &bitfield.underlying_type;
 
     Ok(quote! {
-        struct #ident {
-            pub data: #underlying_type,
+        #[derive(Default, Clone, Copy)]
+        #visibility struct #ident {
+            pub data: #bitfield_type,
         }
 
         impl #ident {
-            pub fn new() -> Self {
-                Self { data: 0 }
+            pub fn new(data: #bitfield_type) -> Self {
+                Self { data }
             }
+
+            #(#fields)*
         }
     })
 }
 
 struct Range {
-    pub lo: u8,
-    pub hi: u8,
+    pub span: Span,
+    pub lo: usize,
+    pub hi: usize,
 }
 
 impl Parse for Range {
@@ -40,23 +90,49 @@ impl Parse for Range {
         let lo = input.parse::<LitInt>()?.base10_parse()?;
         let _: Token![..] = input.parse()?;
         let hi = input.parse::<LitInt>()?.base10_parse()?;
+        Ok(Range {
+            span: input.span(),
+            lo,
+            hi,
+        })
+    }
+}
 
-        // Todo: check range
+impl Range {
+    pub fn mask(&self) -> u64 {
+        u64::MAX >> (u64::BITS as usize - (self.hi - self.lo))
+    }
 
-        Ok(Range { lo, hi })
+    pub fn shift(&self) -> u64 {
+        self.lo as u64
     }
 }
 
 struct Field {
-    pub name: Ident,
+    pub visibility: Visibility,
+    pub ident: Ident,
     pub underlying_type: Type,
     pub range: Range,
     pub modifier: Option<ExprClosure>,
 }
 
+impl Field {
+    pub fn return_type(&self) -> &Type {
+        if let Some(ref modifier) = self.modifier {
+            match &modifier.output {
+                ReturnType::Default => &self.underlying_type,
+                ReturnType::Type(_, return_type) => return_type,
+            }
+        } else {
+            &self.underlying_type
+        }
+    }
+}
+
 impl Parse for Field {
     fn parse(input: ParseStream) -> Result<Self> {
-        let name = input.parse()?;
+        let visibility = input.parse()?;
+        let ident = input.parse()?;
         let _: Token![:] = input.parse()?;
         let underlying_type = input.parse()?;
         let _: Token![@] = input.parse()?;
@@ -68,7 +144,8 @@ impl Parse for Field {
         }
 
         Ok(Field {
-            name,
+            visibility,
+            ident,
             underlying_type,
             range,
             modifier,
@@ -84,6 +161,20 @@ struct Bitfield {
     pub fields: Punctuated<Field, Token![,]>,
 }
 
+impl Bitfield {
+    pub fn underlying_type_bits(&self) -> usize {
+        let bits = match self.underlying_type.to_token_stream().to_string().as_str() {
+            "u8" => u8::BITS,
+            "u16" => u16::BITS,
+            "u32" => u32::BITS,
+            "u64" => u64::BITS,
+            "usize" => usize::BITS,
+            _ => unreachable!(),
+        };
+        bits as usize
+    }
+}
+
 impl Parse for Bitfield {
     fn parse(input: ParseStream) -> Result<Self> {
         let attributes = input.call(Attribute::parse_outer)?;
@@ -93,11 +184,11 @@ impl Parse for Bitfield {
         let _: Token![:] = input.parse()?;
         let underlying_type: Type = input.parse()?;
         match underlying_type.to_token_stream().to_string().as_str() {
-            "bool" | "u8" | "u16" | "u32" | "u64" => (),
+            "u8" | "u16" | "u32" | "u64" | "usize" => (),
             _ => {
                 return Err(Error::new(
                     underlying_type.span(),
-                    "Bitfield underlying type must be a bool or unsigned int",
+                    "Bitfield underlying type must be an unsigned int",
                 ));
             }
         }
