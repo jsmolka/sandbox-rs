@@ -2,7 +2,7 @@ use bitfield_macro::bitfield;
 
 bitfield! {
     pub struct Test: u8 {
-        pub f1: u8 @ 0..2,
+        pub f1: bool @ 0..1,
         pub f2: u8 @ 4..6,
     }
 }

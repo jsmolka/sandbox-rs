@@ -15,28 +15,25 @@ pub fn bitfield(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     let bitfield = syn::parse::<Bitfield>(input)?;
-    let bitfield_type = &bitfield.type_;
-    let bitfield_type_bytes = bitfield.data_type_bytes();
+    let data_type = &bitfield.type_;
+    let data_type_size = type_size(data_type);
 
     let mut data_mask: u64 = 0;
     let mut fields = vec![];
     for field in bitfield.fields {
         let visibility = &field.visibility;
-        let field_type = &field.value_type;
-        let ident = &field.ident;
-        let ident_set = format_ident!("set_{ident}");
-        let return_type = &field.return_type();
+        let value_type = &field.type_;
 
-        let set_value_type = match field_type.to_token_stream().to_string().as_str() {
+        let set_value_type = match value_type.to_token_stream().to_string().as_str() {
             "bool" => quote! {
                 let value = value != 0;
             },
             "u8" | "u16" | "u32" | "u64" | "usize" => quote! {
-                let value = value as #field_type;
+                let value = value as #value_type;
             },
             _ => {
                 return Err(Error::new(
-                    field_type.span(),
+                    value_type.span(),
                     "Bitfield field type must be a bool or unsigned int",
                 ))
             }
@@ -50,26 +47,30 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
             quote! {}
         };
 
-        let range = field.open_range(8 * bitfield_type_bytes)?;
+        let range = field.open_range(type_bits(value_type))?;
         let mask = u64::MAX >> (u64::BITS as usize - range.len());
         let shift = range.start;
 
         data_mask |= mask << shift;
 
+        let ident = &field.ident;
+        let ident_set = format_ident!("set_{ident}");
+        let return_type = field.return_type();
+
         fields.push(quote! {
             #visibility fn #ident(&self) -> #return_type {
-                let mask = #mask as #bitfield_type;
-                let shift = #shift as #bitfield_type;
+                let mask = #mask as #data_type;
+                let shift = #shift as #data_type;
                 let value = (self.data >> shift) & mask;
                 #set_value_type
                 #set_value_modifier
                 value
             }
 
-            #visibility fn #ident_set(&mut self, value: #field_type) {
-                let value = value as #bitfield_type;
-                let mask = #mask as #bitfield_type;
-                let shift = #shift as #bitfield_type;
+            #visibility fn #ident_set(&mut self, value: #value_type) {
+                let value = value as #data_type;
+                let mask = #mask as #data_type;
+                let shift = #shift as #data_type;
                 self.data = (self.data & !(mask << shift)) | ((value & mask) << shift);
             }
         });
@@ -83,48 +84,48 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
         #(#attributes)*
         #[derive(Default, Clone, Copy, Debug)]
         #visibility struct #ident {
-            data: #bitfield_type,
+            data: #data_type,
         }
 
         impl #ident {
-            pub fn new(data: #bitfield_type) -> Self {
+            pub fn new(data: #data_type) -> Self {
                 Self { data: data & Self::data_mask() }
             }
 
-            pub const fn data_mask() -> #bitfield_type {
-                #data_mask as #bitfield_type
+            #visibility const fn data_mask() -> #data_type {
+                #data_mask as #data_type
             }
 
-            pub fn data(&self) -> #bitfield_type {
+            #visibility fn data(&self) -> #data_type {
                 self.data
             }
 
-            pub fn set_data(&mut self, data: #bitfield_type) {
+            #visibility fn set_data(&mut self, data: #data_type) {
                 self.data = data & Self::data_mask();
             }
 
-            pub fn byte(&self, index: usize) -> u8 {
-                assert!(index < #bitfield_type_bytes);
+            #visibility fn byte(&self, index: usize) -> u8 {
+                assert!(index < #data_type_size);
                 (self.data >> (8 * index)) as u8
             }
 
-            pub fn set_byte(&mut self, index: usize, byte: u8) {
-                assert!(index < #bitfield_type_bytes);
+            #visibility fn set_byte(&mut self, index: usize, byte: u8) {
+                assert!(index < #data_type_size);
                 let mask = (Self::data_mask() >> (8 * index)) as u8;
-                let data = ((byte & mask) as #bitfield_type) << (8 * index);
+                let data = ((byte & mask) as #data_type) << (8 * index);
                 self.data = (self.data & !(0xFF << (8 * index))) | data;
             }
 
             #(#fields)*
         }
 
-        impl From<#bitfield_type> for #ident {
-            fn from(value: #bitfield_type) -> Self {
+        impl From<#data_type> for #ident {
+            fn from(value: #data_type) -> Self {
                 #ident::new(value)
             }
         }
 
-        impl From<#ident> for #bitfield_type {
+        impl From<#ident> for #data_type {
             fn from(value: #ident) -> Self {
                 value.data()
             }
@@ -135,7 +136,7 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
 struct Field {
     pub visibility: Visibility,
     pub ident: Ident,
-    pub value_type: Type,
+    pub type_: Type,
     pub range: ExprRange,
     pub modifier: Option<ExprClosure>,
 }
@@ -147,7 +148,7 @@ impl Field {
                 return ty;
             }
         }
-        &self.value_type
+        &self.type_
     }
 
     pub fn open_range(&self, max_end: usize) -> Result<Range<usize>> {
@@ -201,10 +202,31 @@ impl Parse for Field {
         Ok(Field {
             visibility,
             ident,
-            value_type,
+            type_: value_type,
             range,
             modifier,
         })
+    }
+}
+
+fn type_size(type_: &Type) -> usize {
+    use std::mem::size_of;
+    match type_.to_token_stream().to_string().as_str() {
+        "bool" => size_of::<bool>(),
+        "u8" => size_of::<u8>(),
+        "u16" => size_of::<u16>(),
+        "u32" => size_of::<u32>(),
+        "u64" => size_of::<u64>(),
+        "usize" => size_of::<usize>(),
+        _ => unreachable!(),
+    }
+}
+
+fn type_bits(type_: &Type) -> usize {
+    match type_.to_token_stream().to_string().as_str() {
+        "bool" => 1,
+        "u8" | "u16" | "u32" | "u64" | "usize" => 8 * type_size(type_),
+        _ => unreachable!(),
     }
 }
 
@@ -214,20 +236,6 @@ struct Bitfield {
     pub ident: Ident,
     pub type_: Type,
     pub fields: Punctuated<Field, Token![,]>,
-}
-
-impl Bitfield {
-    pub fn data_type_bytes(&self) -> usize {
-        use std::mem::size_of;
-        match self.type_.to_token_stream().to_string().as_str() {
-            "u8" => size_of::<u8>(),
-            "u16" => size_of::<u16>(),
-            "u32" => size_of::<u32>(),
-            "u64" => size_of::<u64>(),
-            "usize" => size_of::<usize>(),
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl Parse for Bitfield {
