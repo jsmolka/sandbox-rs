@@ -2,12 +2,14 @@ use bitfield_macro::bitfield;
 
 bitfield! {
     pub struct Test: u8 {
-        pub f1: u8 @ 0..2 => |value| 2 * value,
+        pub f1: u8 @ 0..2,
+        pub f2: u8 @ 4..6,
     }
 }
 
 #[test]
 fn test() {
-    let test = Test::new(0xFF);
-    assert_eq!(test.f1(), 0b11 * 2);
+    let mut test = Test::default();
+    test.set_byte(0, 0xFF);
+    assert_eq!(test.byte(0), 0x33);
 }
