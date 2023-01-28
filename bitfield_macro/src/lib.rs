@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::*;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use syn::parse::*;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -47,7 +47,11 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
             quote! {}
         };
 
-        let range = field.open_range(type_bits(value_type))?;
+        let range = field.parse_range()?;
+        if !(range.start < range.end && range.end <= type_bits(value_type)) {
+            return Err(Error::new(field.range.span(), "Bitfield range is invalid"));
+        }
+
         let mask = u64::MAX >> (u64::BITS as usize - range.len());
         let shift = range.start;
 
@@ -133,82 +137,6 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     })
 }
 
-struct Field {
-    pub visibility: Visibility,
-    pub ident: Ident,
-    pub type_: Type,
-    pub range: ExprRange,
-    pub modifier: Option<ExprClosure>,
-}
-
-impl Field {
-    pub fn return_type(&self) -> &Type {
-        if let Some(modifier) = &self.modifier {
-            if let ReturnType::Type(_, ty) = &modifier.output {
-                return ty;
-            }
-        }
-        &self.type_
-    }
-
-    pub fn open_range(&self, max_end: usize) -> Result<Range<usize>> {
-        let parse = |expr: &Expr| {
-            if let Expr::Lit(expr) = expr {
-                if let Lit::Int(literal) = &expr.lit {
-                    return literal.base10_parse();
-                }
-            }
-            Err(Error::new(expr.span(), "Bitfield expected integer literal"))
-        };
-
-        let start = self
-            .range
-            .from
-            .as_ref()
-            .map_or_else(|| Ok(0), |expr| parse(expr))?;
-
-        let mut end = self
-            .range
-            .to
-            .as_ref()
-            .map_or_else(|| Ok(max_end), |expr| parse(expr))?;
-
-        if let RangeLimits::Closed(_) = self.range.limits {
-            end += 1
-        }
-
-        if start >= end || end > max_end {
-            return Err(Error::new(self.range.span(), "Bitfield invalid range"));
-        }
-
-        Ok(Range { start, end })
-    }
-}
-
-impl Parse for Field {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let visibility = input.parse()?;
-        let ident = input.parse()?;
-        let _: Token![:] = input.parse()?;
-        let value_type = input.parse()?;
-        let _: Token![@] = input.parse()?;
-        let range = input.parse()?;
-        let modifier = if input.parse::<Token![=>]>().is_ok() {
-            Some(input.parse::<ExprClosure>()?)
-        } else {
-            None
-        };
-
-        Ok(Field {
-            visibility,
-            ident,
-            type_: value_type,
-            range,
-            modifier,
-        })
-    }
-}
-
 fn type_size(type_: &Type) -> usize {
     use std::mem::size_of;
     match type_.to_token_stream().to_string().as_str() {
@@ -266,6 +194,87 @@ impl Parse for Bitfield {
             ident,
             type_,
             fields,
+        })
+    }
+}
+
+struct Field {
+    pub visibility: Visibility,
+    pub ident: Ident,
+    pub type_: Type,
+    pub range: ExprRange,
+    pub modifier: Option<ExprClosure>,
+}
+
+impl Parse for Field {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let visibility = input.parse()?;
+        let ident = input.parse()?;
+        let _: Token![:] = input.parse()?;
+        let type_ = input.parse()?;
+        let _: Token![@] = input.parse()?;
+        let range = input.parse()?;
+        let modifier = if input.parse::<Token![=>]>().is_ok() {
+            Some(input.parse::<ExprClosure>()?)
+        } else {
+            None
+        };
+
+        Ok(Field {
+            visibility,
+            ident,
+            type_,
+            range,
+            modifier,
+        })
+    }
+}
+
+impl Field {
+    pub fn return_type(&self) -> &Type {
+        if let Some(modifier) = &self.modifier {
+            if let ReturnType::Type(_, type_) = &modifier.output {
+                return type_;
+            }
+        }
+        &self.type_
+    }
+
+    pub fn parse_range(&self) -> Result<Range<usize>> {
+        if matches!(self.range.limits, RangeLimits::Closed(_)) {
+            return Err(Error::new(
+                self.range.span(),
+                "Bitfield expected half open range",
+            ));
+        }
+
+        let implicit_bounds_error = || {
+            Err(Error::new(
+                self.range.span(),
+                "Bitfield expected explicit bounds",
+            ))
+        };
+
+        let parse = |expr: &Expr| {
+            if let Expr::Lit(expr) = expr {
+                if let Lit::Int(literal) = &expr.lit {
+                    return literal.base10_parse();
+                }
+            }
+            Err(Error::new(expr.span(), "Bitfield expected integer literal"))
+        };
+
+        Ok(Range {
+            start: self
+                .range
+                .from
+                .as_ref()
+                .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
+            end: self
+                .range
+                .to
+                .as_ref()
+                .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
         })
     }
 }
