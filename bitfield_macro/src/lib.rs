@@ -18,16 +18,11 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
     let data_type = &bitfield.ty;
     let data_type_size = type_size(data_type);
 
-    let mut data_mask = 0u64;
     let mut functions = vec![];
-    for field in bitfield.fields {
-        let visibility = &field.visibility;
+    for field in bitfield.fields.iter() {
         let field_type = &field.ty;
-        let ident = &field.ident;
-        let ident_set = format_ident!("set_{ident}");
-        let return_type = field.return_type();
 
-        let value_cast = match field_type.to_token_stream().to_string().as_str() {
+        let cast = match field_type.to_token_stream().to_string().as_str() {
             "bool" => quote! {
                 let value = value != 0;
             },
@@ -37,40 +32,51 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
             _ => unreachable!(),
         };
 
-        let value_modify = if let Some(modifier) = &field.modifier {
+        let pipe = if let Some(pipe) = &field.pipe {
             quote! {
-                let value = (#modifier)(value);
+                let value = (#pipe)(value);
             }
         } else {
             quote! {}
         };
 
-        let range = field.parse_range()?;
-        if !(range.start < range.end && range.end <= type_bits(field_type)) {
-            return Err(Error::new(field.range.span(), "Bitfield range is invalid"));
-        }
+        let mask = {
+            let value = field.mask();
+            quote! {
+                (#value as #data_type)
+            }
+        };
 
-        let mask = u64::MAX >> (u64::BITS as usize - range.len());
-        let shift = range.start;
-        data_mask |= mask << shift;
+        let shift = {
+            let value = field.shift();
+            quote! {
+                (#value as #data_type)
+            }
+        };
+
+        let visibility = &field.visibility;
+        let ident = &field.ident;
+        let ident_set = format_ident!("set_{ident}");
+        let return_type = field.return_type();
 
         functions.push(quote! {
             #visibility fn #ident(&self) -> #return_type {
-                let mask = #mask as #data_type;
-                let shift = #shift as #data_type;
-                let value = (self.data >> shift) & mask;
-                #value_cast
-                #value_modify
+                let value = (self.data >> #shift) & #mask;
+                #cast
+                #pipe
                 value
             }
 
             #visibility fn #ident_set(&mut self, value: #field_type) {
                 let value = value as #data_type;
-                let mask = #mask as #data_type;
-                let shift = #shift as #data_type;
-                self.data = (self.data & !(mask << shift)) | ((value & mask) << shift);
+                self.data = (self.data & !(#mask << #shift)) | ((value & #mask) << #shift);
             }
         });
+    }
+
+    let mut data_mask = 0u64;
+    for field in bitfield.fields.iter() {
+        data_mask |= field.mask() << field.shift();
     }
 
     let attributes = &bitfield.attributes;
@@ -191,8 +197,8 @@ struct Field {
     pub visibility: Visibility,
     pub ident: Ident,
     pub ty: Type,
-    pub range: ExprRange,
-    pub modifier: Option<ExprClosure>,
+    pub range: Range<usize>,
+    pub pipe: Option<ExprClosure>,
 }
 
 impl Parse for Field {
@@ -202,8 +208,9 @@ impl Parse for Field {
         let _: Token![:] = input.parse()?;
         let ty: Type = input.parse()?;
         let _: Token![@] = input.parse()?;
-        let range = input.parse()?;
-        let modifier = if input.parse::<Token![=>]>().is_ok() {
+        let range_expr = input.parse()?;
+        let range = parse_range(&range_expr)?;
+        let pipe = if input.parse::<Token![=>]>().is_ok() {
             Some(input.parse::<ExprClosure>()?)
         } else {
             None
@@ -219,61 +226,71 @@ impl Parse for Field {
             }
         };
 
+        if !(range.start < range.end && range.end <= type_bits(&ty)) {
+            return Err(Error::new(range_expr.span(), "Bitfield range is invalid"));
+        }
+
         Ok(Field {
             visibility,
             ident,
             ty,
             range,
-            modifier,
+            pipe,
         })
     }
 }
 
 impl Field {
     pub fn return_type(&self) -> &Type {
-        if let Some(modifier) = &self.modifier {
-            if let ReturnType::Type(_, ty) = &modifier.output {
+        if let Some(pipe) = &self.pipe {
+            if let ReturnType::Type(_, ty) = &pipe.output {
                 return ty;
             }
         }
         &self.ty
     }
 
-    pub fn parse_range(&self) -> Result<Range<usize>> {
-        if matches!(self.range.limits, RangeLimits::Closed(_)) {
-            return Err(Error::new(
-                self.range.span(),
-                "Bitfield expected half open range",
-            ));
-        }
-
-        let implicit_bounds_error = || {
-            Err(Error::new(
-                self.range.span(),
-                "Bitfield expected explicit bounds",
-            ))
-        };
-
-        let parse = |expr: &Expr| {
-            if let Expr::Lit(expr) = expr {
-                if let Lit::Int(literal) = &expr.lit {
-                    return literal.base10_parse();
-                }
-            }
-            Err(Error::new(expr.span(), "Bitfield expected integer literal"))
-        };
-
-        Ok(Range {
-            start: self
-                .range
-                .from
-                .as_ref()
-                .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
-            end: self
-                .range
-                .to
-                .as_ref()
-                .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
-        })
+    pub fn mask(&self) -> u64 {
+        u64::MAX >> (u64::BITS as usize - self.range.len())
     }
+
+    pub fn shift(&self) -> u64 {
+        self.range.start as u64
+    }
+}
+
+fn parse_range(range: &ExprRange) -> Result<Range<usize>> {
+    if matches!(range.limits, RangeLimits::Closed(_)) {
+        return Err(Error::new(
+            range.span(),
+            "Bitfield expected half open range",
+        ));
+    }
+
+    let parse = |expr: &Expr| {
+        if let Expr::Lit(expr) = expr {
+            if let Lit::Int(literal) = &expr.lit {
+                return literal.base10_parse();
+            }
+        }
+        Err(Error::new(expr.span(), "Bitfield expected integer literal"))
+    };
+
+    let implicit_bounds_error = || {
+        Err(Error::new(
+            range.span(),
+            "Bitfield expected explicit bounds",
+        ))
+    };
+
+    Ok(Range {
+        start: range
+            .from
+            .as_ref()
+            .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
+        end: range
+            .to
+            .as_ref()
+            .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
+    })
 }

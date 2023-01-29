@@ -9,7 +9,7 @@ bitfield! {
 
 #[test]
 fn test() {
-    let mut test = Test::default();
+    let mut test = Test::new(0);
     test.set_byte(0, 0xFF);
     assert_eq!(test.byte(0), 0x33);
 }
