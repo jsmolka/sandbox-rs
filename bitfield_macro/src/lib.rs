@@ -22,6 +22,16 @@ fn make_bitfield(input: proc_macro::TokenStream) -> Result<TokenStream> {
     for field in bitfield.fields.iter() {
         let field_type = &field.ty;
 
+        if !(field.range.start < field.range.end
+            && field.range.end <= type_bits(data_type)
+            && field.range.len() <= type_bits(field_type))
+        {
+            return Err(Error::new(
+                field.range_expr.span(),
+                "Bitfield range is invalid",
+            ));
+        }
+
         let cast = match field_type.to_token_stream().to_string().as_str() {
             "bool" => quote! {
                 let value = value != 0;
@@ -40,28 +50,17 @@ fn make_bitfield(input: proc_macro::TokenStream) -> Result<TokenStream> {
             quote! {}
         };
 
-        let range = &field.range;
-        if !(range.start < range.end
-            && range.end <= type_bits(data_type)
-            && range.len() <= type_bits(field_type))
-        {
-            return Err(Error::new(
-                field.range_expr.span(),
-                "Bitfield range is invalid",
-            ));
-        }
-
         let mask = {
-            let value = field.mask();
+            let mask = field.mask();
             quote! {
-                (#value as #data_type)
+                (#mask as #data_type)
             }
         };
 
         let shift = {
-            let value = field.shift();
+            let shift = field.shift();
             quote! {
-                (#value as #data_type)
+                (#shift as #data_type)
             }
         };
 
@@ -276,7 +275,7 @@ fn parse_range(range: &ExprRange) -> Result<Range<usize>> {
         ));
     }
 
-    let parse = |expr: &Expr| {
+    let parse_int = |expr: &Expr| {
         if let Expr::Lit(expr) = expr {
             if let Lit::Int(literal) = &expr.lit {
                 return literal.base10_parse();
@@ -296,10 +295,10 @@ fn parse_range(range: &ExprRange) -> Result<Range<usize>> {
         start: range
             .from
             .as_ref()
-            .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
+            .map_or_else(implicit_bounds_error, |expr| parse_int(expr))?,
         end: range
             .to
             .as_ref()
-            .map_or_else(implicit_bounds_error, |expr| parse(expr))?,
+            .map_or_else(implicit_bounds_error, |expr| parse_int(expr))?,
     })
 }
