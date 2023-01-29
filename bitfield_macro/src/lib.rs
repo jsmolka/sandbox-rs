@@ -8,12 +8,12 @@ use syn::*;
 
 #[proc_macro]
 pub fn bitfield(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    parse_tokens(input)
+    make_bitfield(input)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
 
-fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
+fn make_bitfield(input: proc_macro::TokenStream) -> Result<TokenStream> {
     let bitfield = parse::<Bitfield>(input)?;
     let data_type = &bitfield.ty;
     let data_type_size = type_size(data_type);
@@ -39,6 +39,17 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
         } else {
             quote! {}
         };
+
+        let range = &field.range;
+        if !(range.start < range.end
+            && range.end <= type_bits(data_type)
+            && range.len() <= type_bits(field_type))
+        {
+            return Err(Error::new(
+                field.range_expr.span(),
+                "Bitfield range is invalid",
+            ));
+        }
 
         let mask = {
             let value = field.mask();
@@ -74,7 +85,7 @@ fn parse_tokens(input: proc_macro::TokenStream) -> Result<TokenStream> {
         });
     }
 
-    let mut data_mask = 0u64;
+    let mut data_mask = 0;
     for field in bitfield.fields.iter() {
         data_mask |= field.mask() << field.shift();
     }
@@ -197,6 +208,7 @@ struct Field {
     pub visibility: Visibility,
     pub ident: Ident,
     pub ty: Type,
+    pub range_expr: ExprRange,
     pub range: Range<usize>,
     pub pipe: Option<ExprClosure>,
 }
@@ -226,14 +238,11 @@ impl Parse for Field {
             }
         };
 
-        if !(range.start < range.end && range.end <= type_bits(&ty)) {
-            return Err(Error::new(range_expr.span(), "Bitfield range is invalid"));
-        }
-
         Ok(Field {
             visibility,
             ident,
             ty,
+            range_expr,
             range,
             pipe,
         })
@@ -263,7 +272,7 @@ fn parse_range(range: &ExprRange) -> Result<Range<usize>> {
     if matches!(range.limits, RangeLimits::Closed(_)) {
         return Err(Error::new(
             range.span(),
-            "Bitfield expected half open range",
+            "Bitfield expected half-open range",
         ));
     }
 
