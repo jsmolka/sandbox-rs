@@ -38,7 +38,7 @@ impl BitOps for u32 {
     fn bits(&self, range: Range<usize>) -> Self {
         assert!(range.start < range.end);
         assert!(range.end <= Self::BITS as usize);
-        let mask = Self::mask(range.end - range.start);
+        let mask = Self::mask(range.len());
         (self >> range.start) & mask
     }
 
@@ -46,7 +46,7 @@ impl BitOps for u32 {
     fn set_bits(&mut self, range: Range<usize>, value: Self) {
         assert!(range.start < range.end);
         assert!(range.end <= Self::BITS as usize);
-        let mask = Self::mask(range.end - range.start);
+        let mask = Self::mask(range.len());
         *self = (*self & !(mask << range.start)) | ((value & mask) << range.start);
     }
 }
